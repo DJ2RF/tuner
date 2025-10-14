@@ -2,10 +2,11 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Build Tuner",
+            "label": "build",
             "type": "shell",
             "command": "gcc",
             "args": [
+                "-g",
                 "-o",
                 "tuner",
                 "tuner.c",
@@ -13,12 +14,33 @@
                 "-lpthread",
                 "-lm"
             ],
+            "group": "build",
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "type": "cppbuild",
+            "label": "C/C++: gcc Aktive Datei kompilieren",
+            "command": "/usr/bin/gcc",
+            "args": [
+                "-fdiagnostics-color=always",
+                "-g",
+                "${file}",
+                "-o",
+                "${fileDirname}/${fileBasenameNoExtension}"
+            ],
+            "options": {
+                "cwd": "${fileDirname}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
-            "problemMatcher": ["$gcc"],
-            "detail": "Compiles tuner.c to executable"
+            "detail": "Vom Debugger generierte Aufgabe."
         }
     ]
 }
