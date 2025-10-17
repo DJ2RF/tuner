@@ -17,25 +17,26 @@
 #define BAUDRATE B9600
 #define ESP32_IP "192.168.1.29"
 #define ESP32_PORT 75
-#define MAX_STEPS 2000
-#define STEP_SIZE 10
 #define MEAS_DELAY 500
 #define SWR_TARGET 1.8
-#define SWR_TARGET_LOW_BAND 3.0
+#define SWR_TARGET_160M 3.0
 #define MIN_FREQ 1.5
 #define MAX_FREQ 7.5
 #define ESP32_TIMEOUT 360000000
 #define NANOVNA_TIMEOUT 1000000
 #define CSV_FILE "tuner_positions.csv"
 
-#define GROB_PROZENT 1.0
+#define GROB_PROZENT_DEFAULT 0.75
 #define GROB_PROZENT_40M 0.50
-#define BACKLASH_STEPS 2
+#define GROB_PROZENT_60M 0.15
+#define GROB_PROZENT_160M 0.95
 #define MAX_SCAN_STEPS 2000
-#define NO_IMPROVEMENT_LIMIT 200  // Schritte ohne Verbesserung
-#define SCAN_STEP_SIZE_40M 5      // Schrittgröße für 40m-Band (7.0-7.3 MHz)
-#define SCAN_STEP_SIZE_OTHER 10   // Schrittgröße für andere Bänder
-#define BAND_CHANGE_SCAN_STEP_SIZE_40M 5  // Neue Define: Schrittgröße beim Bandwechsel nach 40m
+#define NO_IMPROVEMENT_LIMIT 200
+#define SCAN_STEP_SIZE_40M 5
+#define SCAN_STEP_SIZE_60M 5
+#define SCAN_STEP_SIZE_160M 20  // Gröbere Schritte für groben Scan im 160m
+#define SCAN_STEP_SIZE_OTHER 10
+#define FINE_SCAN_STEP_SIZE_160M 1  // Feinere Schritte für Feintuning im 160m
 
 typedef struct { double freq; long position; } Point;
 Point freq_points[] = {
@@ -50,6 +51,7 @@ double previous_mhz = 1.8;
 long motor_position = 0;
 float global_best_swr = 99.0;
 long global_best_pos = 0;
+int esp32_sock = -1;
 
 void load_last_position() {
     FILE *file = fopen(CSV_FILE, "r");
@@ -150,7 +152,7 @@ int check_nanovna() {
 }
 
 float read_swr() {
-    usleep(500000);  // Pause nach Motor
+    usleep(500000);
     if (check_nanovna() < 0) {
         printf("ERROR: NanoVNA nicht erreichbar – reconnect...\n");
         close(serial_fd);
@@ -227,22 +229,42 @@ void set_frequency(double mhz) {
     send_serial_cmd("resume");
 }
 
-int send_motor_cmd(const char* direction, int steps, int rounds) {
-    if (steps == 0) return 0;
-    printf("DEBUG: Sende Motor-Befehl: %s, steps=%d, rounds=%d\n", direction, steps, rounds);
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return -1;
+int connect_esp32() {
+    if (esp32_sock >= 0) return 0;
+    esp32_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (esp32_sock < 0) return -1;
     struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(ESP32_PORT) };
     inet_pton(AF_INET, ESP32_IP, &addr.sin_addr);
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(sock); return -1; }
+    if (connect(esp32_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(esp32_sock);
+        esp32_sock = -1;
+        return -1;
+    }
+    printf("INFO: Verbunden mit ESP32\n");
+    return 0;
+}
+
+void disconnect_esp32() {
+    if (esp32_sock >= 0) {
+        close(esp32_sock);
+        esp32_sock = -1;
+        printf("INFO: Verbindung zu ESP32 getrennt\n");
+    }
+}
+
+int send_motor_cmd(const char* direction, int steps, int rounds) {
+    if (steps == 0) return 0;
+    if (connect_esp32() < 0) return -1;
+    
+    printf("DEBUG: Sende Motor-Befehl: %s, steps=%d, rounds=%d\n", direction, steps, rounds);
     char buf[32];
     
     snprintf(buf, sizeof(buf), "rounds,%d\n", rounds);
-    write(sock, buf, strlen(buf));
+    write(esp32_sock, buf, strlen(buf));
     usleep(300000);
     
     snprintf(buf, sizeof(buf), "%s,%d\n", direction, steps);
-    write(sock, buf, strlen(buf));
+    write(esp32_sock, buf, strlen(buf));
     usleep(300000);
     
     char full_response[1024] = {0};
@@ -253,10 +275,10 @@ int send_motor_cmd(const char* direction, int steps, int rounds) {
         struct timeval tv = {0, 1000000};
         fd_set readfds;
         FD_ZERO(&readfds);
-        FD_SET(sock, &readfds);
-        int ready = select(sock + 1, &readfds, NULL, NULL, &tv);
+        FD_SET(esp32_sock, &readfds);
+        int ready = select(esp32_sock + 1, &readfds, NULL, NULL, &tv);
         if (ready > 0) {
-            int n = read(sock, full_response + total_read, sizeof(full_response) - total_read - 1);
+            int n = read(esp32_sock, full_response + total_read, sizeof(full_response) - total_read - 1);
             if (n > 0) {
                 total_read += n;
                 full_response[total_read] = '\0';
@@ -277,21 +299,16 @@ int send_motor_cmd(const char* direction, int steps, int rounds) {
         }
         total_wait += 1000000;
     }
-    close(sock);
     return fertig_found ? 0 : -1;
 }
 
 void set_motor_speed(const char* speed) {
-    printf("DEBUG: Setze Motor-Geschwindigkeit: %s\n", speed);
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return;
-    struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(ESP32_PORT) };
-    inet_pton(AF_INET, ESP32_IP, &addr.sin_addr);
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(sock); return; }
+    if (connect_esp32() < 0) return;
     
+    printf("DEBUG: Setze Motor-Geschwindigkeit: %s\n", speed);
     char buf[32];
     snprintf(buf, sizeof(buf), "%s\n", speed);
-    write(sock, buf, strlen(buf));
+    write(esp32_sock, buf, strlen(buf));
     usleep(300000);
     
     char response[1024] = {0};
@@ -302,10 +319,10 @@ void set_motor_speed(const char* speed) {
         struct timeval tv = {0, 1000000};
         fd_set readfds;
         FD_ZERO(&readfds);
-        FD_SET(sock, &readfds);
-        int ready = select(sock + 1, &readfds, NULL, NULL, &tv);
+        FD_SET(esp32_sock, &readfds);
+        int ready = select(esp32_sock + 1, &readfds, NULL, NULL, &tv);
         if (ready > 0) {
-            int n = read(sock, response + total_read, sizeof(response) - total_read - 1);
+            int n = read(esp32_sock, response + total_read, sizeof(response) - total_read - 1);
             if (n > 0) {
                 total_read += n;
                 response[total_read] = '\0';
@@ -326,7 +343,6 @@ void set_motor_speed(const char* speed) {
         }
         total_wait += 1000000;
     }
-    close(sock);
 }
 
 long interpolate_position(double mhz) {
@@ -368,33 +384,38 @@ int is_40m_band(double freq) {
     return (freq >= 7.0 && freq <= 7.3);
 }
 
-// Scan ohne harte Begrenzung – fährt weiter, bis SWR verbessert oder NO_IMPROVEMENT_LIMIT Schritte ohne Verbesserung
-void scan_and_find_best(double mhz, const char* dir, int is_band_change_to_40m) {
+int is_60m_band(double freq) {
+    return (freq >= 5.0 && freq <= 5.5);
+}
+
+int is_160m_band(double freq) {
+    return (freq >= 1.8 && freq <= 2.0);
+}
+
+void scan_and_find_best(double mhz, const char* dir) {
     int cmd_steps = SCAN_STEP_SIZE_OTHER;
-    if (is_40m_band(mhz)) {
-        if (is_band_change_to_40m) {
-            cmd_steps = BAND_CHANGE_SCAN_STEP_SIZE_40M;
-            printf("INFO: Bandwechsel nach 40m – verwende Schrittgröße %d\n", cmd_steps);
-        } else {
-            cmd_steps = SCAN_STEP_SIZE_40M;
-            printf("INFO: Innerhalb 40m – verwende Schrittgröße %d\n", cmd_steps);
-        }
-    }
+    if (is_40m_band(mhz)) cmd_steps = SCAN_STEP_SIZE_40M;
+    else if (is_60m_band(mhz)) cmd_steps = SCAN_STEP_SIZE_60M;
+    else if (is_160m_band(mhz)) cmd_steps = SCAN_STEP_SIZE_160M;
+
+    float target_swr = is_160m_band(mhz) ? SWR_TARGET_160M : SWR_TARGET;
+    printf("INFO: Ziel-SWR für dieses Band: %.1f\n", target_swr);
     
     float last_swr = read_swr();
     global_best_swr = last_swr;
     global_best_pos = motor_position;
     int no_improvement_count = 0;
     
-    printf("INFO: Starte Scan in Richtung %s mit Schrittgröße %d\n", dir, cmd_steps);
+    printf("INFO: Starte groben Scan in Richtung %s mit Schrittgröße %d\n", dir, cmd_steps);
     
-    for (int i = 0; i < MAX_SCAN_STEPS; i++) {  // Praktisch unbegrenzt
+    // Grober Scan
+    for (int i = 0; i < MAX_SCAN_STEPS; i++) {
         set_motor_speed("mittel");
         if (send_motor_cmd(dir, cmd_steps, 1) < 0) break;
         motor_position += (strcmp(dir, "hoch") == 0 ? cmd_steps : -cmd_steps);
         
         float new_swr = read_swr();
-        printf("INFO: Scan Schritt %d: SWR %.2f (Pos %ld)\n", i+1, new_swr, motor_position);
+        printf("INFO: Grober Scan Schritt %d: SWR %.2f (Pos %ld)\n", i+1, new_swr, motor_position);
         
         if (new_swr < global_best_swr - 0.05) {
             global_best_swr = new_swr;
@@ -405,25 +426,60 @@ void scan_and_find_best(double mhz, const char* dir, int is_band_change_to_40m) 
             no_improvement_count++;
         }
         
-        if (global_best_swr < SWR_TARGET) {
-            printf("INFO: Ziel-SWR erreicht – stoppe\n");
+        if (global_best_swr < target_swr) {
+            printf("INFO: Ziel-SWR erreicht – stoppe groben Scan\n");
             break;
         }
         
-        if (no_improvement_count > NO_IMPROVEMENT_LIMIT) {
-            printf("INFO: %d Schritte ohne Verbesserung – stoppe Scan\n", NO_IMPROVEMENT_LIMIT);
+        if (no_improvement_count > NO_IMPROVEMENT_LIMIT / 2) {  // Früher stoppen bei Stagnation
+            printf("INFO: %d Schritte ohne Verbesserung – stoppe groben Scan\n", NO_IMPROVEMENT_LIMIT / 2);
             break;
         }
     }
     
-    // Fahre zur besten Position
-    long delta = global_best_pos - motor_position;
-    if (labs(delta) > 0) {
-        const char* back_dir = (delta > 0) ? "hoch" : "tief";
-        printf("INFO: Rückfahrt zur besten Position: %ld Schritte %s\n", labs(delta), back_dir);
-        set_motor_speed("mittel");
-        send_motor_cmd(back_dir, labs(delta), 1);
-        motor_position = global_best_pos;
+    // Feintuning nur für 160m-Band
+    if (is_160m_band(mhz) && global_best_swr > 2.0) {  // Nur wenn noch Potenzial (manuell 1.86 möglich)
+        const char* fine_dir = dir;  // Starte Feintuning in gleicher Richtung
+        int fine_steps = FINE_SCAN_STEP_SIZE_160M;
+        printf("INFO: Starte Feintuning für 160m mit Schrittgröße %d\n", fine_steps);
+        
+        // Rücksetze auf beste grobe Position
+        long delta_back = motor_position - global_best_pos;
+        if (labs(delta_back) > 0) {
+            const char* back_dir = (delta_back > 0) ? "tief" : "hoch";
+            send_motor_cmd(back_dir, labs(delta_back), 1);
+            motor_position = global_best_pos;
+        }
+        
+        // Feintuning: Kleinere Schritte, engerer Stopp
+        no_improvement_count = 0;
+        for (int i = 0; i < 400; i++) {  // Max 400 feine Schritte
+            set_motor_speed("langsam");  // Langsamer für Präzision
+            if (send_motor_cmd(fine_dir, fine_steps, 1) < 0) break;
+            motor_position += (strcmp(fine_dir, "hoch") == 0 ? fine_steps : -fine_steps);
+            
+            float new_swr = read_swr();
+            printf("INFO: Fein Scan Schritt %d: SWR %.2f (Pos %ld)\n", i+1, new_swr, motor_position);
+            
+            if (new_swr < global_best_swr - 0.02) {  // Feinere Verbesserungsschwelle
+                global_best_swr = new_swr;
+                global_best_pos = motor_position;
+                no_improvement_count = 0;
+            } else {
+                no_improvement_count++;
+            }
+            
+            if (global_best_swr < 2.0) break;  // Besser als dein manuelles 1.86 anstreben
+            if (no_improvement_count > 50) break;
+        }
+        
+        // Rückfahrt zur besten Position
+        long delta = global_best_pos - motor_position;
+        if (labs(delta) > 0) {
+            const char* back_dir = (delta > 0) ? "hoch" : "tief";
+            send_motor_cmd(back_dir, labs(delta), 1);
+            motor_position = global_best_pos;
+        }
     }
     
     printf("INFO: Final SWR: %.2f bei Pos %ld\n", global_best_swr, motor_position);
@@ -438,7 +494,11 @@ void move_to_freq(double mhz) {
     const char* initial_dir = (delta > 0) ? "hoch" : "tief";
     int abs_delta = labs(delta);
     
-    double grob_prozent = is_40m_band(mhz) ? (is_40m_band(previous_mhz) ? GROB_PROZENT_40M : GROB_PROZENT) : GROB_PROZENT;
+    double grob_prozent = GROB_PROZENT_DEFAULT;
+    if (is_40m_band(mhz)) grob_prozent = GROB_PROZENT_40M;
+    else if (is_60m_band(mhz)) grob_prozent = GROB_PROZENT_60M;
+    else if (is_160m_band(mhz)) grob_prozent = GROB_PROZENT_160M;
+    
     int early_steps = (int)(abs_delta * grob_prozent);
     
     printf("INFO: Grobe Bewegung: %d Schritte %s (%.0f%% von %d)\n", early_steps, initial_dir, grob_prozent*100, abs_delta);
@@ -451,11 +511,7 @@ void move_to_freq(double mhz) {
     }
     motor_position += (delta > 0 ? early_steps : -early_steps);
     
-    // Bestimme, ob Bandwechsel nach 40m
-    int is_band_change_to_40m = is_40m_band(mhz) && !is_40m_band(previous_mhz);
-    
-    // Starte Scan in der Richtung der Bewegung
-    scan_and_find_best(mhz, initial_dir, is_band_change_to_40m);
+    scan_and_find_best(mhz, initial_dir);
     
     previous_mhz = mhz;
 }
@@ -464,7 +520,7 @@ int auto_tune(double mhz) {
     printf("INFO: Tuning für %.4f MHz\n", mhz);
     set_frequency(mhz);
     move_to_freq(mhz);
-    return (global_best_swr < SWR_TARGET) ? 0 : -1;
+    return (global_best_swr < (is_160m_band(mhz) ? SWR_TARGET_160M : SWR_TARGET)) ? 0 : -1;
 }
 
 int main(int argc, char *argv[]) {
@@ -487,6 +543,7 @@ int main(int argc, char *argv[]) {
     }
     int status = auto_tune(mhz);
     close(serial_fd);
+    disconnect_esp32();
     printf("Tuning %s\n", status == 0 ? "erfolgreich" : "fehlgeschlagen");
     return status;
 }
