@@ -7,7 +7,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/tuner",
-            "args": [],
+            "args": ["1.890"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
