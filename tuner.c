@@ -26,16 +26,16 @@
 #define NANOVNA_TIMEOUT 1000000
 #define CSV_FILE "tuner_positions.csv"
 
-#define GROB_PROZENT_DEFAULT 0.75
-#define GROB_PROZENT_40M 0.50
-#define GROB_PROZENT_60M 0.15
+#define GROB_PROZENT_DEFAULT 1
+#define GROB_PROZENT_40M 0.60
+#define GROB_PROZENT_60M 0.55
 #define GROB_PROZENT_160M 0.95
 #define MAX_SCAN_STEPS 2000
-#define NO_IMPROVEMENT_LIMIT 200
+#define NO_IMPROVEMENT_LIMIT 600
 #define SCAN_STEP_SIZE_40M 5
 #define SCAN_STEP_SIZE_60M 5
 #define SCAN_STEP_SIZE_160M 20  // Gröbere Schritte für groben Scan im 160m
-#define SCAN_STEP_SIZE_OTHER 10
+#define SCAN_STEP_SIZE_OTHER 20
 #define FINE_SCAN_STEP_SIZE_160M 1  // Feinere Schritte für Feintuning im 160m
 
 typedef struct { double freq; long position; } Point;
