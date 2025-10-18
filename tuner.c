@@ -26,12 +26,12 @@
 #define NANOVNA_TIMEOUT 1000000
 #define CSV_FILE "tuner_positions.csv"
 
-#define GROB_PROZENT_DEFAULT 1
+#define GROB_PROZENT_DEFAULT 0.80
 #define GROB_PROZENT_40M 0.60
 #define GROB_PROZENT_60M 0.55
 #define GROB_PROZENT_160M 0.95
 #define MAX_SCAN_STEPS 2000
-#define NO_IMPROVEMENT_LIMIT 600
+#define NO_IMPROVEMENT_LIMIT 800
 #define SCAN_STEP_SIZE_40M 5
 #define SCAN_STEP_SIZE_60M 5
 #define SCAN_STEP_SIZE_160M 20  // Gröbere Schritte für groben Scan im 160m
